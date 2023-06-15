@@ -4419,6 +4419,8 @@ TEST_F(TracingServiceImplTest, CloneSession) {
   TraceConfig trace_config;
   trace_config.add_buffers()->set_size_kb(32);  // Buf 0.
   trace_config.add_buffers()->set_size_kb(32);  // Buf 1.
+  trace_config.set_trace_uuid_lsb(4242);
+  trace_config.set_trace_uuid_msb(3737);
   auto* ds_cfg = trace_config.add_data_sources()->mutable_config();
   ds_cfg->set_name("ds_1");
   ds_cfg->set_target_buffer(0);
@@ -4469,8 +4471,11 @@ TEST_F(TracingServiceImplTest, CloneSession) {
           [clone_done, &clone_uuid](const Consumer::OnSessionClonedArgs& args) {
             ASSERT_TRUE(args.success);
             ASSERT_TRUE(args.error.empty());
-            ASSERT_NE(args.uuid.msb(), 0);
-            ASSERT_NE(args.uuid.lsb(), 0);
+            // Ensure the LSB is preserved, but the MSB is different. See
+            // comments in tracing_service_impl.cc and perfetto_cmd.cc around
+            // triggering_subscription_id().
+            ASSERT_EQ(args.uuid.lsb(), 4242);
+            ASSERT_NE(args.uuid.msb(), 3737);
             clone_uuid = args.uuid;
             clone_done();
           }));
@@ -4527,6 +4532,64 @@ TEST_F(TracingServiceImplTest, CloneSession) {
           AllOf(
               Property(&protos::gen::TraceUuid::msb, Eq(clone_uuid.msb())),
               Property(&protos::gen::TraceUuid::lsb, Eq(clone_uuid.lsb()))))));
+}
+
+// Test that a consumer cannot clone a session from a consumer with a different
+// uid (unless it's marked as eligible for bugreport, see next test).
+TEST_F(TracingServiceImplTest, CloneSessionAcrossUidDenied) {
+  // The consumer the creates the initial tracing session.
+  std::unique_ptr<MockConsumer> consumer = CreateMockConsumer();
+  consumer->Connect(svc.get());
+
+  // The consumer that clones it and reads back the data.
+  std::unique_ptr<MockConsumer> consumer2 = CreateMockConsumer();
+  consumer2->Connect(svc.get(), 1234);
+
+  TraceConfig trace_config;
+  trace_config.add_buffers()->set_size_kb(32);
+
+  consumer->EnableTracing(trace_config);
+  auto flush_request = consumer->Flush();
+  ASSERT_TRUE(flush_request.WaitForReply());
+
+  auto clone_done = task_runner.CreateCheckpoint("clone_done");
+  EXPECT_CALL(*consumer2, OnSessionCloned(_))
+      .WillOnce(Invoke([clone_done](const Consumer::OnSessionClonedArgs& args) {
+        clone_done();
+        ASSERT_FALSE(args.success);
+        ASSERT_TRUE(base::Contains(args.error, "session from another UID"));
+      }));
+  consumer2->CloneSession(1);
+  task_runner.RunUntilCheckpoint("clone_done");
+}
+
+// Test that a consumer can clone a session from a different uid if the trace is
+// marked as eligible for bugreport.
+TEST_F(TracingServiceImplTest, CloneSessionAcrossUidForBugreport) {
+  // The consumer the creates the initial tracing session.
+  std::unique_ptr<MockConsumer> consumer = CreateMockConsumer();
+  consumer->Connect(svc.get());
+
+  // The consumer that clones it and reads back the data.
+  std::unique_ptr<MockConsumer> consumer2 = CreateMockConsumer();
+  consumer2->Connect(svc.get(), 1234);
+
+  TraceConfig trace_config;
+  trace_config.add_buffers()->set_size_kb(32);
+  trace_config.set_bugreport_score(1);
+
+  consumer->EnableTracing(trace_config);
+  auto flush_request = consumer->Flush();
+  ASSERT_TRUE(flush_request.WaitForReply());
+
+  auto clone_done = task_runner.CreateCheckpoint("clone_done");
+  EXPECT_CALL(*consumer2, OnSessionCloned(_))
+      .WillOnce(Invoke([clone_done](const Consumer::OnSessionClonedArgs& args) {
+        clone_done();
+        ASSERT_TRUE(args.success);
+      }));
+  consumer2->CloneSession(1);
+  task_runner.RunUntilCheckpoint("clone_done");
 }
 
 TEST_F(TracingServiceImplTest, InvalidBufferSizes) {

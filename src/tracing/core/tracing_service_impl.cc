@@ -3580,8 +3580,13 @@ base::Status TracingServiceImpl::DoCloneSession(ConsumerEndpointImpl* consumer,
         "The consumer is already attached to another tracing session");
   }
 
-  if (src->consumer_uid != consumer->uid_ && consumer->uid_ != 0)
+  // Skip the UID check for sessions marked with a bugreport_score > 0.
+  // Those sessions, by design, can be stolen by any other consumer for the
+  // sake of creating snapshots for bugreports.
+  if (src->config.bugreport_score() <= 0 &&
+      src->consumer_uid != consumer->uid_ && consumer->uid_ != 0) {
     return PERFETTO_SVC_ERR("Not allowed to clone a session from another UID");
+  }
 
   // First clone all TraceBuffer(s). This can fail because of ENOMEM. If it
   // happens bail out early before creating any session.
@@ -3614,8 +3619,14 @@ base::Status TracingServiceImpl::DoCloneSession(ConsumerEndpointImpl* consumer,
                std::forward_as_tuple(tsid, consumer, src->config, task_runner_))
            .first->second;
 
+  // Generate a new UUID for the cloned session, but preserve the LSB. In some
+  // contexts the LSB is used to tie the trace back to the statsd subscription
+  // that triggered it. See the corresponding code in perfetto_cmd.cc which
+  // reads at triggering_subscription_id().
+  const int64_t orig_uuid_lsb = src->trace_uuid.lsb();
   cloned_session->state = TracingSession::CLONED_READ_ONLY;
-  cloned_session->trace_uuid = base::Uuidv4();  // Generate a new UUID.
+  cloned_session->trace_uuid = base::Uuidv4();
+  cloned_session->trace_uuid.set_lsb(orig_uuid_lsb);
   *new_uuid = cloned_session->trace_uuid;
 
   for (auto& kv : buf_snaps) {
