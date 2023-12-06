@@ -39,7 +39,7 @@ cc_test {
   ],
   test_suites: [
     "cts",
-    "mts",
+    "mts-art",
     "vts10",
     "general-tests",
   ],
@@ -59,6 +59,7 @@ cc_test {
         ":CtsPerfettoProducerApp",
         ":CtsPerfettoReleaseApp",
         ":CtsPerfettoDebuggableApp",
+        "perfetto_device_preparer.sh",
   ],
   stl: "libc++_static",
   // This test is also run via Mainline Testing against the ART Mainline
